@@ -47,6 +47,31 @@ jobs:
       - name: Set up Python 3.12
         run: uv python install 3.12
 
+      - name: Install free CLI research sources
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.local/bin:$PATH"
+
+          echo "::group::Install yt-dlp (YouTube + transcripts + comments)"
+          uv tool install --upgrade yt-dlp || echo "Warning: yt-dlp install failed"
+          echo "::endgroup::"
+
+          echo "::group::Install Printing Press keyless CLIs (Digg, arXiv, Techmeme, Yahoo Finance)"
+          for slug in digg arxiv techmeme yahoo-finance; do
+            npx -y @mvanhorn/printing-press-library@0.1.27 install "$slug" --cli-only || echo "Warning: $slug CLI install failed"
+          done
+          echo "::endgroup::"
+
+          echo "Installed CLI binaries on PATH:"
+          for bin in yt-dlp digg-pp-cli arxiv-pp-cli techmeme-pp-cli yahoo-finance-pp-cli; do
+            if path="$(command -v "$bin" 2>/dev/null)"; then
+              echo "  OK  $bin -> $path"
+            else
+              echo "  --  $bin (not found)"
+            fi
+          done
+
       - name: Restore research library cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -61,6 +86,10 @@ jobs:
           RESEARCH_DISCOVER: ${{ inputs.discover }}
           RESEARCH_QUICK: ${{ inputs.quick }}
           LAST30DAYS_LIBRARY_OWNER: ${{ vars.LAST30DAYS_LIBRARY_OWNER }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INCLUDE_SOURCES: ${{ vars.INCLUDE_SOURCES || 'devto,dripstack,youtube_comments' }}
+          LAST30DAYS_SEARXNG_URL: ${{ vars.LAST30DAYS_SEARXNG_URL }}
+          LAST30DAYS_YT_SUB_LANGS: ${{ vars.LAST30DAYS_YT_SUB_LANGS }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-4-hydrogen' }}
@@ -72,6 +101,10 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
           BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
+          BSKY_HANDLE: ${{ secrets.BSKY_HANDLE }}
+          BSKY_APP_PASSWORD: ${{ secrets.BSKY_APP_PASSWORD }}
+          TRUTHSOCIAL_TOKEN: ${{ secrets.TRUTHSOCIAL_TOKEN }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
         run: uv run --no-project --python 3.12 python .github/scripts/run_pages_research.py
 

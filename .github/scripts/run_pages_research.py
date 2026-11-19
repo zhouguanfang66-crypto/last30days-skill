@@ -688,11 +688,31 @@ def stage_public_site(library_dir: Path, site_dir: Path) -> None:
     (site_dir / ".nojekyll").write_text("", encoding="utf-8")
 
 
+def collect_active_sources(env: dict[str, str]) -> list[str]:
+    """Run --diagnose to log active free/configured sources without network calls."""
+    rc, stdout, stderr = run_engine(["--diagnose", "--no-browser-cookies"], env=env, timeout=60)
+    if rc != 0 or not stdout.strip():
+        if stderr:
+            print(stderr, file=sys.stderr)
+        return []
+    try:
+        payload = json.loads(stdout)
+    except Exception:
+        return []
+    sources = payload.get("available_sources")
+    ext_cmds = payload.get("external_commands") or {}
+    has_github = payload.get("has_github")
+    print(f"Available sources: {', '.join(sources) if isinstance(sources, list) else 'unknown'}", flush=True)
+    print(f"External CLIs: {json.dumps(ext_cmds, sort_keys=True)} | has_github_token={has_github}", flush=True)
+    return [str(s) for s in sources] if isinstance(sources, list) else []
+
+
 def write_step_summary(
     rows: list[tuple[str, str, str]],
     pages_url: str,
     brief_count: int,
     translation_backend: str,
+    active_sources: list[str] | None = None,
 ) -> None:
     """Append a readable run summary to GITHUB_STEP_SUMMARY if present."""
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY", "").strip()
@@ -705,6 +725,8 @@ def write_step_summary(
         f"- **Total briefs in library:** {brief_count}",
         f"- **Chinese translation backend:** `{translation_backend}`",
     ]
+    if active_sources:
+        lines.append(f"- **Active sources ({len(active_sources)}):** `{', '.join(active_sources)}`")
     if pages_url:
         lines.append(f"- **Site URL:** {pages_url}")
         lines.append(f"- **Atom Feed:** {pages_url.rstrip('/')}/feed.xml")
@@ -725,6 +747,10 @@ def main() -> int:
     child_env["LAST30DAYS_STORE"] = "1"
     child_env["LAST30DAYS_MEMORY_DIR"] = str(LIBRARY_DIR)
     child_env.setdefault("LAST30DAYS_LIBRARY_OWNER", os.environ.get("GITHUB_REPOSITORY_OWNER", "last30days"))
+
+    print("::group::Engine source diagnostics", flush=True)
+    active_sources = collect_active_sources(child_env)
+    print("::endgroup::", flush=True)
 
     raw_topics = os.environ.get("RESEARCH_TOPICS", "")
     discover_domain = os.environ.get("RESEARCH_DISCOVER", "").strip()
@@ -814,7 +840,7 @@ def main() -> int:
     repo = os.environ.get("GITHUB_REPOSITORY", "").split("/")[-1]
     pages_url = f"https://{owner}.github.io/{repo}/" if owner and repo else ""
 
-    write_step_summary(rows, pages_url, len(brief_files), translation_backend)
+    write_step_summary(rows, pages_url, len(brief_files), translation_backend, active_sources=active_sources)
 
     webhook_url = os.environ.get("WEBHOOK_URL", "").strip()
     if webhook_url:
