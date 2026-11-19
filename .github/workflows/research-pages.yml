@@ -61,6 +61,10 @@ jobs:
           RESEARCH_DISCOVER: ${{ inputs.discover }}
           RESEARCH_QUICK: ${{ inputs.quick }}
           LAST30DAYS_LIBRARY_OWNER: ${{ vars.LAST30DAYS_LIBRARY_OWNER }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-4-hydrogen' }}
+          GEMINI_THINKING_LEVEL: ${{ vars.GEMINI_THINKING_LEVEL || 'MEDIUM' }}
           SCRAPECREATORS_API_KEY: ${{ secrets.SCRAPECREATORS_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
