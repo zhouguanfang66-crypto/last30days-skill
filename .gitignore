@@ -50,3 +50,7 @@ docs/brainstorms/
 /work
 /print
 .worktrees
+
+# Scheduled GitHub Pages research output
+/_library/
+/_site/

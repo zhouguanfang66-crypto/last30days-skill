@@ -1,0 +1,6 @@
+# Topics researched automatically by .github/workflows/research-pages.yml
+# One topic per line. Blank lines and lines starting with '#' are ignored.
+# Edit this file on GitHub (or pass custom topics via Actions -> Run workflow).
+
+AI coding agents
+Claude Code

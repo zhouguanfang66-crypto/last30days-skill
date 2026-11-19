@@ -1,0 +1,102 @@
+name: Scheduled Research & Pages
+
+on:
+  schedule:
+    # Daily at 01:00 UTC (09:00 UTC+8)
+    - cron: "0 1 * * *"
+  workflow_dispatch:
+    inputs:
+      topics:
+        description: "Topics to research (comma or newline separated; leave blank to use .github/research-topics.txt)"
+        required: false
+        default: ""
+        type: string
+      discover:
+        description: "Optional domain for trending discovery (e.g. AI agents)"
+        required: false
+        default: ""
+        type: string
+      quick:
+        description: "Use quick mode for faster CI runs"
+        required: false
+        default: true
+        type: boolean
+
+permissions: {}
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Research & build library
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      - name: Restore research library cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: _library
+          key: last30days-library-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            last30days-library-
+
+      - name: Run research and build static site
+        env:
+          RESEARCH_TOPICS: ${{ inputs.topics }}
+          RESEARCH_DISCOVER: ${{ inputs.discover }}
+          RESEARCH_QUICK: ${{ inputs.quick }}
+          LAST30DAYS_LIBRARY_OWNER: ${{ vars.LAST30DAYS_LIBRARY_OWNER }}
+          SCRAPECREATORS_API_KEY: ${{ secrets.SCRAPECREATORS_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          X_BEARER_TOKEN: ${{ secrets.X_BEARER_TOKEN }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
+          BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+        run: uv run --no-project --python 3.12 python .github/scripts/run_pages_research.py
+
+      - name: Save research library cache
+        if: always()
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: _library
+          key: last30days-library-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
+        with:
+          path: _site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
