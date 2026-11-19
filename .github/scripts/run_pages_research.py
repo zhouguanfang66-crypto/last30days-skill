@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import os
 import re
@@ -611,9 +612,220 @@ def inject_zh_toggle(html_path: Path, zh_map: dict[str, str], *, is_brief: bool)
     html_path.write_text(content, encoding="utf-8")
 
 
-def enhance_site_with_zh_toggle(site_dir: Path, cache_path: Path) -> str:
+DRIVE_DOC_CSS = """
+body {
+  font-family: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
+  color: #1f2328;
+  background: #ffffff;
+  max-width: 820px;
+  margin: 0 auto;
+  padding: 24px;
+  line-height: 1.7;
+  font-size: 14px;
+}
+h1 { font-size: 24px; color: #111827; margin: 0 0 12px; border-bottom: 2px solid #e5e7eb; padding-bottom: 8px; }
+h2 { font-size: 18px; color: #1d4ed8; margin: 24px 0 10px; }
+h3 { font-size: 15px; color: #111827; margin: 16px 0 6px; }
+p { margin: 8px 0; }
+a { color: #1a73e8; text-decoration: underline; }
+ul, ol { margin: 8px 0 12px; padding-left: 22px; }
+li { margin: 4px 0; }
+blockquote { margin: 10px 0; padding: 8px 14px; border-left: 3px solid #93c5fd; background: #f8fafc; color: #334155; }
+code, pre { font-family: ui-monospace, Menlo, Consolas, monospace; background: #f3f4f6; color: #111827; }
+code { padding: 1px 4px; border-radius: 3px; }
+pre { padding: 10px 12px; border-radius: 6px; overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+th, td { border: 1px solid #d1d5db; padding: 6px 10px; text-align: left; }
+th { background: #f3f4f6; font-weight: 600; }
+.meta-banner { font-size: 12px; color: #6b7280; margin-bottom: 16px; }
+""".strip()
+
+_VOID_TAGS = frozenset({"br", "hr", "img", "meta", "link", "input"})
+_DROP_TAGS = frozenset({"script", "style", "noscript", "svg"})
+_DATE_IN_SLUG_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
+
+
+class _ZhDocRenderer(HTMLParser):
+    """Render a clean light-mode pure-Chinese HTML body suitable for Google Docs import."""
+
+    def __init__(self, zh_map: dict[str, str]) -> None:
+        super().__init__(convert_charrefs=True)
+        self._zh_map = zh_map
+        self._in_body = False
+        self._in_title = False
+        self._drop_depth = 0
+        self._code_depth = 0
+        self._footer_depth = 0
+        self._buf: list[str] = []
+        self._title_buf: list[str] = []
+        self.out: list[str] = []
+        self.title: str = ""
+
+    def _flush(self) -> None:
+        if not self._buf:
+            return
+        raw = "".join(self._buf)
+        self._buf.clear()
+        if self._code_depth > 0 or self._footer_depth > 0:
+            self.out.append(html.escape(raw))
+            return
+        key = raw.strip()
+        if key and key in self._zh_map:
+            rendered = raw.replace(key, self._zh_map[key], 1)
+        else:
+            rendered = raw
+        self.out.append(html.escape(rendered))
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        lower = tag.lower()
+        if lower == "title":
+            self._in_title = True
+            return
+        if lower == "body":
+            self._in_body = True
+            return
+        if not self._in_body:
+            return
+        self._flush()
+        if lower in _DROP_TAGS:
+            self._drop_depth += 1
+            return
+        if self._drop_depth > 0:
+            return
+        attr_map = dict(attrs)
+        classes = (attr_map.get("class") or "").split()
+        if "engine-footer" in classes:
+            self._footer_depth += 1
+        if lower in ("code", "pre"):
+            self._code_depth += 1
+        kept_attrs: list[str] = []
+        if lower == "a" and attr_map.get("href"):
+            href = attr_map["href"] or ""
+            if href.startswith(("http://", "https://", "mailto:")):
+                kept_attrs.append(f'href="{html.escape(href, quote=True)}"')
+        attr_str = (" " + " ".join(kept_attrs)) if kept_attrs else ""
+        self.out.append(f"<{lower}{attr_str}>")
+
+    def handle_endtag(self, tag: str) -> None:
+        lower = tag.lower()
+        if lower == "title":
+            self._in_title = False
+            self.title = "".join(self._title_buf).strip()
+            return
+        if lower == "body":
+            self._flush()
+            self._in_body = False
+            return
+        if not self._in_body:
+            return
+        if lower in _DROP_TAGS:
+            if self._drop_depth > 0:
+                self._drop_depth -= 1
+            return
+        if self._drop_depth > 0:
+            return
+        self._flush()
+        if lower not in _VOID_TAGS:
+            self.out.append(f"</{lower}>")
+        if lower in ("code", "pre") and self._code_depth > 0:
+            self._code_depth -= 1
+        if lower == "div" and self._footer_depth > 0:
+            self._footer_depth -= 1
+
+    def handle_data(self, data: str) -> None:
+        if self._in_title:
+            self._title_buf.append(data)
+            return
+        if not self._in_body or self._drop_depth > 0:
+            return
+        self._buf.append(data)
+
+    def close(self) -> None:
+        self._flush()
+        super().close()
+
+
+def _clean_topic_label(raw_title: str) -> str:
+    """Strip common last30days title suffixes to produce a clean Google Doc name."""
+    cleaned = raw_title.strip()
+    for sep in (" — ", " - last30days", " | last30days"):
+        if sep in cleaned:
+            cleaned = cleaned.split(sep, 1)[0].strip()
+    return cleaned or "Research Brief"
+
+
+def export_drive_sync_bundle(
+    site_dir: Path,
+    raw_brief_htmls: dict[str, str],
+    zh_map: dict[str, str],
+    pages_url: str,
+) -> int:
+    """Export pre-rendered Chinese HTML docs and manifest.json for Google Drive sync."""
+    sync_dir = site_dir / "drive-sync"
+    sync_dir.mkdir(parents=True, exist_ok=True)
+    base_url = pages_url.rstrip("/") if pages_url else ""
+
+    entries: list[dict[str, str]] = []
+    for filename in sorted(raw_brief_htmls.keys(), reverse=True):
+        raw_html = raw_brief_htmls[filename]
+        slug = filename[:-5] if filename.endswith(".html") else filename
+
+        renderer = _ZhDocRenderer(zh_map)
+        renderer.feed(raw_html)
+        renderer.close()
+
+        raw_title = renderer.title or slug
+        title_zh = zh_map.get(raw_title, raw_title)
+        date_match = _DATE_IN_SLUG_RE.search(slug)
+        date_str = date_match.group(1) if date_match else datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        topic_label = _clean_topic_label(raw_title)
+        doc_name = f"{date_str} - {topic_label} 研报（中文版）"
+
+        html_url = f"{base_url}/briefs/{filename}" if base_url else f"briefs/{filename}"
+        zh_filename = f"{slug}-zh.html"
+        zh_doc_url = f"{base_url}/drive-sync/{zh_filename}" if base_url else f"drive-sync/{zh_filename}"
+
+        banner_html = (
+            f'<div class="meta-banner">来源：last30days 自动研报 · 日期：{html.escape(date_str)} · '
+            f'<a href="{html.escape(html_url, quote=True)}">查看网页原版（支持中英切换）</a></div>'
+        )
+        doc_html = (
+            '<!DOCTYPE html>\n<html lang="zh-CN">\n<head>\n<meta charset="utf-8">\n'
+            f"<title>{html.escape(doc_name)}</title>\n"
+            f"<style>\n{DRIVE_DOC_CSS}\n</style>\n</head>\n<body>\n"
+            f"{banner_html}\n{''.join(renderer.out)}\n</body>\n</html>\n"
+        )
+        (sync_dir / zh_filename).write_text(doc_html, encoding="utf-8")
+
+        entries.append({
+            "slug": slug,
+            "filename": filename,
+            "date": date_str,
+            "title": raw_title,
+            "title_zh": title_zh,
+            "doc_name": doc_name,
+            "html_url": html_url,
+            "zh_doc_html_url": zh_doc_url,
+        })
+
+    manifest = {
+        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "site_url": f"{base_url}/" if base_url else "",
+        "index_html_url": f"{base_url}/index.html" if base_url else "index.html",
+        "feed_xml_url": f"{base_url}/feed.xml" if base_url else "feed.xml",
+        "briefs": entries,
+    }
+    (sync_dir / "manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return len(entries)
+
+
+def enhance_site_with_zh_toggle(site_dir: Path, cache_path: Path) -> tuple[str, dict[str, str], dict[str, str]]:
     """Pre-translate all generated HTML pages and inject the Chinese toggle button."""
     html_files: list[tuple[Path, bool]] = []
+    raw_brief_htmls: dict[str, str] = {}
     index_path = site_dir / "index.html"
     if index_path.is_file():
         html_files.append((index_path, False))
@@ -621,6 +833,7 @@ def enhance_site_with_zh_toggle(site_dir: Path, cache_path: Path) -> str:
     if briefs_dir.is_dir():
         for brief_path in sorted(briefs_dir.glob("*.html")):
             html_files.append((brief_path, True))
+            raw_brief_htmls[brief_path.name] = brief_path.read_text(encoding="utf-8")
 
     all_segments: list[str] = list(STATIC_ZH_UI.keys())
     for html_path, _ in html_files:
@@ -636,7 +849,7 @@ def enhance_site_with_zh_toggle(site_dir: Path, cache_path: Path) -> str:
     for html_path, is_brief in html_files:
         inject_zh_toggle(html_path, zh_map, is_brief=is_brief)
 
-    return backend
+    return backend, zh_map, raw_brief_htmls
 
 
 def send_webhook(webhook_url: str, summary_text: str) -> None:
@@ -830,15 +1043,20 @@ def main() -> int:
 
     stage_public_site(LIBRARY_DIR, SITE_DIR)
 
-    print("::group::Building Chinese/English toggle", flush=True)
-    translation_backend = enhance_site_with_zh_toggle(SITE_DIR, ZH_CACHE_FILE)
-    print(f"Chinese toggle embedded (backend: {translation_backend})", file=sys.stderr)
-    print("::endgroup::", flush=True)
-
-    brief_files = sorted((SITE_DIR / "briefs").glob("*.html")) if (SITE_DIR / "briefs").is_dir() else []
     owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "")
     repo = os.environ.get("GITHUB_REPOSITORY", "").split("/")[-1]
     pages_url = f"https://{owner}.github.io/{repo}/" if owner and repo else ""
+
+    print("::group::Building Chinese/English toggle and Google Drive sync bundle", flush=True)
+    translation_backend, zh_map, raw_brief_htmls = enhance_site_with_zh_toggle(SITE_DIR, ZH_CACHE_FILE)
+    drive_count = export_drive_sync_bundle(SITE_DIR, raw_brief_htmls, zh_map, pages_url)
+    print(
+        f"Chinese toggle embedded (backend: {translation_backend}); exported {drive_count} Drive sync doc(s)",
+        file=sys.stderr,
+    )
+    print("::endgroup::", flush=True)
+
+    brief_files = sorted((SITE_DIR / "briefs").glob("*.html")) if (SITE_DIR / "briefs").is_dir() else []
 
     write_step_summary(rows, pages_url, len(brief_files), translation_backend, active_sources=active_sources)
 
